@@ -1,0 +1,138 @@
+#include <Servo.h>
+
+// LDRs conectados a los pines ADC del ESP32
+const int LDR_TOP_LEFT = 32;
+const int LDR_TOP_RIGHT = 33;
+const int LDR_BOTTOM_LEFT = 34;
+const int LDR_BOTTOM_RIGHT = 35;
+
+// Servos
+Servo servo_horizontal;
+Servo servo_vertical;
+
+float angleH = 90;
+float angleV = 90;
+const int UPPER_LIMIT_POS = 160;  // Límite superior de los servos
+const int LOWER_LIMIT_POS = 20;   // Límite inferior de los servos
+
+// Parámetros y variables de Control PID
+float Kp = 0.08;
+float Ki = 0.002;
+float Kd = 0.03;
+
+float intX = 0, intY = 0;
+float prevX = 0, prevY = 0;
+const float deadband = 15.0;      // Zona muerta para evitar ruido o fluctuaciones menores
+const float intLimit = 3000.0;    // Límite de saturación integral (Anti-windup)
+unsigned long lastTime = 0;
+
+void setup() {
+  Serial.begin(115200);
+  delay(500);
+  
+  servo_vertical.attach(19);
+  servo_horizontal.attach(18);
+  servo_vertical.write((int)angleV);
+  servo_horizontal.write((int)angleH);
+  
+  analogReadResolution(12); // Configura la resolución ADC del ESP32 a 12 bits (0-4095)
+  lastTime = millis();
+  
+  Serial.println("--- SISTEMA DE SEGUIMIENTO SOLAR INICIADO ---");
+}
+
+void loop() {
+  // 1. Lectura de los 4 módulos LDR
+  int ldr_tl_value = analogRead(LDR_TOP_LEFT);
+  int ldr_tr_value = analogRead(LDR_TOP_RIGHT);
+  int ldr_bl_value = analogRead(LDR_BOTTOM_LEFT);
+  int ldr_br_value = analogRead(LDR_BOTTOM_RIGHT);
+
+  float average_top = (ldr_tl_value + ldr_tr_value) / 2.0;
+  float average_bottom = (ldr_bl_value + ldr_br_value) / 2.0;
+  float average_left = (ldr_tl_value + ldr_bl_value) / 2.0;
+  float average_right = (ldr_tr_value + ldr_br_value) / 2.0;
+
+  // 2. Cálculo del tiempo transcurrido (dt) para el PID
+  unsigned long now = millis();
+  float dt = (now - lastTime) / 1000.0;
+  if (dt <= 0) dt = 0.03;
+  lastTime = now;
+
+  // 3. Cálculo de errores (Diferencia de iluminación)
+  float errorX = average_left - average_right;  // Eje horizontal
+  float errorY = average_top - average_bottom;  // Eje vertical
+
+  // 4. Ejecución del algoritmo PID para cada eje
+  float outX = calcularPID(errorX, intX, prevX, dt);
+  float outY = calcularPID(errorY, intY, prevY, dt);
+
+  // Guardar ángulos anteriores para comparar el movimiento
+  float prevAngleH = angleH;
+  float prevAngleV = angleV;
+
+  // Aplicar la corrección calculada por el PID a los ángulos
+  angleH += outX;
+  angleV += outY;
+
+  // Restringir los ángulos a los límites mecánicos permitidos
+  angleH = constrain(angleH, LOWER_LIMIT_POS, UPPER_LIMIT_POS);
+  angleV = constrain(angleV, LOWER_LIMIT_POS, UPPER_LIMIT_POS);
+
+  // Mover los servomotores
+  servo_horizontal.write((int)angleH);
+  servo_vertical.write((int)angleV);
+
+  // --- IMPRESIÓN EN EL MONITOR SERIE DE LA ACCIÓN Y MOVIMIENTO ---
+  Serial.println("========================================");
+  Serial.print("LDR [TL: "); Serial.print(ldr_tl_value);
+  Serial.print(" | TR: "); Serial.print(ldr_tr_value);
+  Serial.print(" | BL: "); Serial.print(ldr_bl_value);
+  Serial.print(" | BR: "); Serial.print(ldr_br_value);
+  Serial.println("]");
+
+  Serial.print("Promedios -> Top: "); Serial.print(average_top);
+  Serial.print(" | Bot: "); Serial.print(average_bottom);
+  Serial.print(" | Left: "); Serial.print(average_left);
+  Serial.print(" | Right: "); Serial.println(average_right);
+
+  // Diagnóstico de movimiento Eje Vertical (Y)
+  if (abs(errorY) < deadband) {
+    Serial.println("Eje Vertical (V): En zona muerta (Sin movimiento vertical).");
+  } else if (average_top > average_bottom) {
+    Serial.print("Eje Vertical (V) -> Movimiento hacia ARRIBA. Angulo actual: "); Serial.println(angleV);
+  } else {
+    Serial.print("Eje Vertical (V) -> Movimiento hacia ABAJO. Angulo actual: "); Serial.println(angleV);
+  }
+
+  // Diagnóstico de movimiento Eje Horizontal (H)
+  if (abs(errorX) < deadband) {
+    Serial.println("Eje Horizontal (H): En zona muerta (Sin movimiento horizontal).");
+  } else if (average_left > average_right) {
+    Serial.print("Eje Horizontal (H) -> Movimiento hacia la IZQUIERDA. Angulo actual: "); Serial.println(angleH);
+  } else {
+    Serial.print("Eje Horizontal (H) -> Movimiento hacia la DERECHA. Angulo actual: "); Serial.println(angleH);
+  }
+
+  // Pequeño retardo de estabilidad del ciclo
+  delay(500); // 500ms para poder leer con comodidad en la consola serie
+}
+
+// Función que calcula el algoritmo PID general
+float calcularPID(float error, float &integral, float &previous, float dt) {
+  // Aplicar zona muerta para evitar oscilaciones por variaciones mínimas de luz
+  if (abs(error) < deadband) {
+    error = 0;
+  }
+  
+  // Término Integral con limitación (Anti-windup)
+  integral += error * dt;
+  integral = constrain(integral, -intLimit, intLimit);
+  
+  // Término Derivativo
+  float derivative = (error - previous) / dt;
+  previous = error;
+  
+  // Salida del controlador PID combinada
+  return (Kp * error) + (Ki * integral) + (Kd * derivative);
+}
